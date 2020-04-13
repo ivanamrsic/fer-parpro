@@ -11,14 +11,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdbool.h>
 
 // tags. 1 - left , 2 - right
 
-typedef struct {
-    int lastOwner;
-    int whoNeedsIt;
-    int isClean;
-} Fork;
+typedef enum { UNDEFINED = 0, LEFT = 1, RIGHT = 2 } Side;
+
+typedef enum { CREATE, THINK, EAT, REQEST_RECEIVED, REQUEST_SENT, FORK_RECEIVED, FORK_SENT } PrintAction;
 
 typedef struct {
     int rank;
@@ -27,40 +26,62 @@ typedef struct {
     int rightNeighbor;
 } MyInfo;
 
-int leftRequestSent;
-int rightRequestSent;
+typedef struct {
+    int lastOwner;
+    int whoNeedsIt;
+    int isClean;
+} Fork;
 
-Fork leftFork;
-Fork rightFork;
+typedef struct {
+    int processorRank;
+    Side side;
+} NeighborRequest;
 
-int requests[2];
+static const NeighborRequest nullRequest = { -1, UNDEFINED };
 
 MPI_Datatype ForkType;
 
 MyInfo myInfo;
 
+Fork leftFork;
+Fork rightFork;
+
+NeighborRequest incomingRequests[2];
+
+Side sentRequestForFork;
+
 void createForkDataType();
-void fillRequestsArray();
-void setupCutlery();
-int findOutLeftNeighbor();
-int findOutRightNeighbor();
+void initializeCutlery();
+int findOutNeighbor(Side side);
 
 void startPhilosopherLife();
 void think();
 void eat();
-void getForks();
-void handleReceivedForkMessage(Fork fork, int tag);
+
+bool hasBothForks();
+
+void getFork(Side side);
+void sendFork(Side side);
+
+void listenForMessages();
+void handleReceivedMessage(Fork fork, int tag);
+void handleReceivedForkFor(Fork fork, Side side, Fork receivedFork);
+void addRequest(int neighbor, Side side);
+
+bool hasRequest(int index);
 void respondToRequests();
-void sendRightFork();
-void sendLeftFork();
-void addRequest(Fork fork);
-void listenForRequest();
+void respondTo(NeighborRequest request);
+
+void customPrint(PrintAction action, int count, Side side);
 
 // MARK: - Main -
 
 int main(int argc, char *argv[]) {
 
-    fillRequestsArray();
+    // Processor doesn't have any incoming requests.
+    for (int i = 0; i < 2; i++) {
+        incomingRequests[i] = nullRequest;
+    }
 
     srand(time(0));
 
@@ -71,12 +92,12 @@ int main(int argc, char *argv[]) {
     MPI_Comm_size(MPI_COMM_WORLD, &myInfo.processorCount);
     MPI_Comm_rank(MPI_COMM_WORLD, &myInfo.rank);
 
-    printf("Hello world from processor %d out of %d processors.\n", myInfo.rank, myInfo.processorCount);
+    customPrint(CREATE, -1, UNDEFINED);
 
-    myInfo.leftNeighbor = findOutLeftNeighbor();
-    myInfo.rightNeighbor = findOutRightNeighbor();
+    myInfo.leftNeighbor = findOutNeighbor(LEFT); // left = 1
+    myInfo.rightNeighbor = findOutNeighbor(RIGHT); // right = 2
 
-    setupCutlery();
+    initializeCutlery();
 
     startPhilosopherLife();
 
@@ -86,163 +107,180 @@ int main(int argc, char *argv[]) {
 void startPhilosopherLife() {
     while(1) {
         think();
-        while (leftFork.whoNeedsIt == myInfo.rank || rightFork.whoNeedsIt == myInfo.rank) {
+        while (!hasBothForks()) {
             sleep(1);
-            getForks();
+            Side side = leftFork.whoNeedsIt == myInfo.rank ? LEFT : RIGHT;
+            if (sentRequestForFork == UNDEFINED) { getFork(side); }
+            listenForMessages();
         }
         eat();
         respondToRequests();
     }
 }
 
-// MARK: - Chores
-
-void getForks() {
-
-    if (leftFork.whoNeedsIt == myInfo.rank && leftRequestSent != 1) {
-        printf("Procesor %d trazi lijevu vilicu od %d procesora.\n", myInfo.rank, myInfo.leftNeighbor);
-        MPI_Send(&leftFork, 1, ForkType, myInfo.leftNeighbor, 1, MPI_COMM_WORLD);
-        leftRequestSent = 1;
-    }
-
-    if (rightFork.whoNeedsIt == myInfo.rank && rightRequestSent != 1) {
-        printf("Procesor %d trazi desnu vilicu od %d procesora.\n", myInfo.rank, myInfo.rightNeighbor);
-        MPI_Send(&rightFork, 1, ForkType, myInfo.rightNeighbor, 2, MPI_COMM_WORLD);
-        rightRequestSent = 1;
-    }
-
-    listenForRequest();
+bool hasBothForks() {
+    return !(leftFork.whoNeedsIt == myInfo.rank) && !(rightFork.whoNeedsIt == myInfo.rank);
 }
 
-void listenForRequest() {
+void getFork(Side side) {
+
+    if (side == LEFT) {
+        customPrint(REQUEST_SENT, -1, LEFT);
+        leftFork.whoNeedsIt = myInfo.rank;
+        MPI_Send(&leftFork, 1, ForkType, myInfo.leftNeighbor, 1, MPI_COMM_WORLD);
+        sentRequestForFork = LEFT;
+        return;
+    }
+
+    if (side == RIGHT) {
+        customPrint(REQUEST_SENT, -1, RIGHT);
+        rightFork.whoNeedsIt = myInfo.rank;
+        MPI_Send(&rightFork, 1, ForkType, myInfo.rightNeighbor, 2, MPI_COMM_WORLD);
+        sentRequestForFork = RIGHT;
+    }
+}
+
+void listenForMessages() {
     Fork fork;
     MPI_Status status;
     MPI_Recv(&fork, 1, ForkType, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-    handleReceivedForkMessage(fork, status.MPI_TAG);
+    handleReceivedMessage(fork, status.MPI_TAG);
 }
 
-void handleReceivedForkMessage(Fork fork, int tag) {
+void handleReceivedMessage(Fork fork, int tag) {
 
     // Poruka je zahtjev
     if (fork.whoNeedsIt != myInfo.rank) {
-        printf("Dobiven zahtjev od %d za procesor %d.\n", fork.whoNeedsIt, myInfo.rank);
 
-//                inace ako je poruka zahtjev            // drugi traze moju vilicu
-//                    obradi zahtjev (odobri ili zabiljezi);
-        addRequest(fork);
+        Side side = tag == 1 ? LEFT : RIGHT;
+        customPrint(REQEST_RECEIVED, -1, side);
+
+        addRequest(fork.whoNeedsIt, side);
+
+        sleep(1);
+
+        if ((side == LEFT && leftFork.isClean != 1) || (side == RIGHT && rightFork.isClean != 1)) {
+            respondToRequests();
+        }
+
         return;
     }
 
     // Poruka je odgovor
-    if (fork.lastOwner == myInfo.leftNeighbor && tag == 1) {
-        printf("Procesor %d je primio lijevu vilicu od %d procesora.\n", myInfo.rank, fork.lastOwner);
-        leftFork.whoNeedsIt = -1;
-        leftFork.lastOwner = myInfo.rank;
-        leftRequestSent = 0;
-        return;
-    } else if (fork.lastOwner == myInfo.rightNeighbor && tag == 2) {
-        printf("Procesor %d je primio desnu vilicu od %d procesora.\n", myInfo.rank, fork.lastOwner);
-        rightFork.whoNeedsIt = -1;
-        rightFork.lastOwner = myInfo.rank;
-        rightRequestSent = 0;
+    if (tag == 1) {
+        handleReceivedForkFor(leftFork, LEFT, fork);
+    } else if (tag == 2) {
+        handleReceivedForkFor(rightFork, RIGHT, fork);
     }
 }
 
+void handleReceivedForkFor(Fork fork, Side side, Fork receivedFork) {
+
+    if (side == LEFT) {
+        leftFork.whoNeedsIt = -1;
+        leftFork.lastOwner = myInfo.rank;
+        leftFork.isClean = 1;
+        customPrint(FORK_RECEIVED, -1, LEFT);
+    } else {
+        rightFork.whoNeedsIt = -1;
+        rightFork.lastOwner = myInfo.rank;
+        rightFork.isClean = 1;
+        customPrint(FORK_RECEIVED, -1, RIGHT);
+    }
+
+    fork.whoNeedsIt = -1;
+    fork.lastOwner = myInfo.rank;
+    sentRequestForFork = UNDEFINED;
+}
 
 void think() {
     //            i 'istovremeno' odgovaraj na zahtjeve!            // asinkrono, s povremenom provjerom (vidi nastavak)
 
     // philosopher will think between 1 and 5 seconds
     int secondsCount = rand() % 5 + 1;
-    printf("Procesor %d razmislja %d sekundi.\n", myInfo.rank, secondsCount);
+    double time = secondsCount;
 
-    double time = 1000 * secondsCount;
+    customPrint(THINK, secondsCount, UNDEFINED);
 
     while (time > 0.0) {
-        usleep(1000);
+        sleep(1);
 
         int flag = 0;
 
         MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, MPI_STATUS_IGNORE);
-
-        if (flag != 0) {
-            listenForRequest();
-        }
-
-        time -= 1000.0;
+        if (flag != 0) { listenForMessages(); }
+        time -= 1;
     }
-
-    sleep(secondsCount);
 }
 
 void eat() {
-    // philosopher will think between 1 and 10 seconds
+    // philosopher will eat between 1 and 5 seconds
     int secondsCount = rand() % 5 + 1;
-    printf("Procesor %d jede %d sekundi.\n", myInfo.rank, secondsCount);
+
+    customPrint(EAT, secondsCount, UNDEFINED);
     sleep(secondsCount);
 
     leftFork.isClean = 0;
     rightFork.isClean = 0;
 }
 
+bool hasRequest(int index) {
+    return incomingRequests[index].processorRank != nullRequest.processorRank && incomingRequests[index].side != UNDEFINED;
+}
 
 void respondToRequests() {
 
-    if (requests[0] == -1) { return; }
+    if (!hasRequest(0)) { return; }
+    if (hasRequest(0)) { respondTo(incomingRequests[0]); }
+    if (hasRequest(1)) { respondTo(incomingRequests[1]); }
 
-    if (requests[0] == myInfo.leftNeighbor && leftFork.lastOwner == myInfo.rank && leftFork.whoNeedsIt != myInfo.rank) {
-        sendLeftFork();
-        requests[0] = -1;
-    }
-
-    if (requests[0] == myInfo.rightNeighbor && rightFork.lastOwner == myInfo.rank && rightFork.whoNeedsIt != myInfo.rank) {
-        sendRightFork();
-        requests[0] = -1;
-    }
-
-    if (requests[1] == myInfo.leftNeighbor && leftFork.lastOwner == myInfo.rank && leftFork.whoNeedsIt != myInfo.rank) {
-        sendLeftFork();
-        requests[1] = -1;
-    }
-
-    if (requests[1] == myInfo.rightNeighbor && rightFork.lastOwner == myInfo.rank && rightFork.whoNeedsIt != myInfo.rank) {
-        sendRightFork();
-        requests[1] = -1;
-    }
-
-    if (requests[0] == -1 && requests[1] != -1) {
-        requests[0] = requests[1];
-        requests[1] = -1;
+    if (!hasRequest(0) && hasRequest(1)) {
+        incomingRequests[0] = incomingRequests[1];
+        incomingRequests[1] = nullRequest;
     }
 }
 
-void sendRightFork() {
+void respondTo(NeighborRequest request) {
 
-    rightFork.isClean = 1;
-    rightFork.lastOwner = myInfo.rank;
-    rightFork.whoNeedsIt = myInfo.rightNeighbor;
+    if (request.side == LEFT && leftFork.isClean != 0) { return; }
+    if (request.side == RIGHT && rightFork.isClean != 0) { return; }
 
-    printf("Procesor %d je poslao desnu vilicu %d procesoru.\n", myInfo.rank, myInfo.rightNeighbor);
-    MPI_Send(&rightFork, 1, ForkType, myInfo.rightNeighbor, 2, MPI_COMM_WORLD);
-
-    rightFork.whoNeedsIt = myInfo.rank;
+    sendFork(request.side);
 }
 
-void sendLeftFork() {
+void sendFork(Side side) {
 
-    leftFork.isClean = 1;
-    leftFork.lastOwner = myInfo.rank;
-    leftFork.whoNeedsIt = myInfo.leftNeighbor;
+    int messageTag = side == LEFT ? 1 : 2;
 
-    printf("Procesor %d je poslao lijevu vilicu %d procesoru.\n", myInfo.rank, myInfo.leftNeighbor);
-    MPI_Send(&leftFork, 1, ForkType, myInfo.leftNeighbor, 1, MPI_COMM_WORLD);
+    if (side == LEFT) {
+        leftFork.isClean = 1;
+        leftFork.lastOwner = myInfo.rank;
+        leftFork.whoNeedsIt = myInfo.leftNeighbor;
+        MPI_Send(&leftFork, 1, ForkType, myInfo.leftNeighbor, messageTag, MPI_COMM_WORLD);
+    } else if (side == RIGHT) {
+        rightFork.isClean = 1;
+        rightFork.lastOwner = myInfo.rank;
+        rightFork.whoNeedsIt = myInfo.rightNeighbor;
+        MPI_Send(&rightFork, 1, ForkType, myInfo.rightNeighbor, messageTag, MPI_COMM_WORLD);
+    }
 
-    leftFork.whoNeedsIt = myInfo.rank;
+    customPrint(FORK_SENT, -1, side);
+
+    if (side == LEFT) {
+        leftFork.whoNeedsIt = myInfo.rank;
+    } else {
+        rightFork.whoNeedsIt = myInfo.rank;
+    }
 }
 
-void addRequest(Fork fork) {
-    int index = requests[0] == -1 ? 0 : 1;
-    requests[index] = fork.whoNeedsIt;
+void addRequest(int neighbor, Side side) {
+
+    NeighborRequest request;
+    request.processorRank = neighbor;
+    request.side = side;
+
+    int index = !hasRequest(0) ? 0 : 1;
+    incomingRequests[index] = request;
 }
 
 // MARK: - Initialization -
@@ -261,7 +299,7 @@ void createForkDataType() {
     MPI_Type_commit(&ForkType);
 }
 
-void setupCutlery() {
+void initializeCutlery() {
 
     rightFork.whoNeedsIt = myInfo.rank;
     leftFork.whoNeedsIt = myInfo.rank;
@@ -282,18 +320,54 @@ void setupCutlery() {
     leftFork.lastOwner = myInfo.rank;
 }
 
-int findOutLeftNeighbor() {
-    if (myInfo.rank == myInfo.processorCount - 1) { return 0; }
-    return myInfo.rank + 1;
-}
+int findOutNeighbor(Side side) {
 
-int findOutRightNeighbor() {
+    if (side == 1) {
+        if (myInfo.rank == myInfo.processorCount - 1) { return 0; }
+        return myInfo.rank + 1;
+    }
+
     if (myInfo.rank > 0) { return myInfo.rank - 1; }
     return myInfo.processorCount - 1;
 }
 
-void fillRequestsArray() {
-    for (int i = 0; i < 2; i++) {
-        requests[i] = -1;
+// MARK: - Ispis -
+
+void customPrint(PrintAction action, int count, Side side) {
+
+    for (int i = 0; i < myInfo.rank; i++) {
+        printf("\t\t\t\t\t");
+    }
+
+    if (action == CREATE) {
+        printf("Kreiran procesor %d, ukupno: %d\n", myInfo.rank, myInfo.processorCount);
+    } else if (action == THINK) {
+        printf("%d. razmislja %d sekundi\n", myInfo.rank, count);
+    } else if (action == EAT) {
+        printf("%d. jede %d sekundi\n", myInfo.rank, count);
+    } else if (action == REQEST_RECEIVED) {
+        if (side == LEFT) {
+            printf("Dobiven zahtjev od %d. za lijevom.\n", myInfo.leftNeighbor);
+        } else {
+            printf("Dobiven zahtjev od %d. za desnom.\n", myInfo.rightNeighbor);
+        }
+    } else if (action == REQUEST_SENT) {
+        if (side == LEFT) {
+            printf("%d. trazi lijevu vilicu od %d\n", myInfo.rank, myInfo.leftNeighbor);
+        } else {
+            printf("%d. trazi desnu vilicu od %d\n", myInfo.rank, myInfo.rightNeighbor);
+        }
+    } else if (action == FORK_RECEIVED) {
+        if (side == LEFT) {
+            printf("%d. je primio lijevu vilicu od %d\n", myInfo.rank, myInfo.leftNeighbor);
+        } else {
+            printf("%d. je primio desnu vilicu od %d\n", myInfo.rank, myInfo.rightNeighbor);
+        }
+    } else if (action == FORK_SENT) {
+        if (side == LEFT) {
+            printf("%d je poslao lijevu vilicu %d\n", myInfo.rank, myInfo.leftNeighbor);
+        } else {
+            printf("%d je poslao desnu vilicu %d\n", myInfo.rank, myInfo.rightNeighbor);
+        }
     }
 }
