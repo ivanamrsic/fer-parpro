@@ -25,8 +25,7 @@ typedef struct {
 } MyInfo;
 
 typedef struct {
-    int lastOwner;
-    int whoNeedsIt;
+    int ownerRank;
     int isClean;
 } Fork;
 
@@ -35,7 +34,34 @@ typedef struct {
     Side side;
 } NeighborRequest;
 
-static const NeighborRequest nullRequest = { -1, UNDEFINED };
+void createForkDataType();
+void initializeCutlery();
+int findOutNeighbor(Side side);
+
+void startPhilosopherLife();
+void think();
+void eat();
+
+bool isValid(int messageTag);
+Side sideFrom(int messageTag);
+bool hasBothForks();
+bool hasRequest(int index);
+bool canSendFork(Side side);
+int neighborFor(Side side);
+
+void requestForkFrom(Side side);
+void sendForkTo(Side side);
+
+void listenForMessages();
+void handleReceivedMessage(Fork fork, int messageTag);
+void addRequest(int neighbor, Side side);
+
+void respondToRequests();
+void respondTo(NeighborRequest request);
+
+void customPrint(PrintAction action, int secondCount, int neighbor);
+
+// MARK: - Global variables -
 
 MPI_Datatype ForkType;
 
@@ -48,38 +74,27 @@ NeighborRequest incomingRequests[2];
 
 Side sentRequestForFork;
 
-void createForkDataType();
-void initializeCutlery();
-int findOutNeighbor(Side side);
+// MARK: - Constants -
 
-void startPhilosopherLife();
-void think();
-void eat();
+static const NeighborRequest nullRequest = { -1, UNDEFINED };
 
-bool hasBothForks();
-bool hasRequest(int index);
-bool canRespondToRequest(Side side);
+// it is important to differentiate message sender (left vs right)
+// because in case of numberOfProcessors == 2
+// both left and right neighbor will be the same
+static const int leftRequestForkTag = 1;
+static const int leftSendForkTag = 2;
+static const int rightRequestForkTag = 3;
+static const int rightSendForkTag = 4;
 
-void getFork(Side side);
-void sendFork(Side side);
-
-void listenForMessages();
-void handleReceivedMessage(Fork fork, int tag);
-void addRequest(int neighbor, Side side);
-
-void respondToRequests();
-void respondTo(NeighborRequest request);
-
-void customPrint(PrintAction action, int count, Side side);
+static const int clean = 1;
+static const int dirty = 2;
 
 // MARK: - Main -
 
 int main(int argc, char *argv[]) {
 
     // Processor doesn't have any incoming requests.
-    for (int i = 0; i < 2; i++) {
-        incomingRequests[i] = nullRequest;
-    }
+    for (int i = 0; i < 2; i++) { incomingRequests[i] = nullRequest; }
 
     srand(time(0));
 
@@ -90,12 +105,12 @@ int main(int argc, char *argv[]) {
     MPI_Comm_size(MPI_COMM_WORLD, &myInfo.processorCount);
     MPI_Comm_rank(MPI_COMM_WORLD, &myInfo.rank);
 
-    customPrint(CREATE, -1, UNDEFINED);
-
     myInfo.leftNeighbor = findOutNeighbor(LEFT);
     myInfo.rightNeighbor = findOutNeighbor(RIGHT);
 
     initializeCutlery();
+
+    customPrint(CREATE, -1, -1);
 
     startPhilosopherLife();
 
@@ -109,8 +124,8 @@ void startPhilosopherLife() {
         think();
         while (!hasBothForks()) {
             sleep(1);
-            Side side = leftFork.whoNeedsIt == myInfo.rank ? LEFT : RIGHT;
-            if (sentRequestForFork == UNDEFINED) { getFork(side); }
+            Side side = leftFork.ownerRank != myInfo.rank ? LEFT : RIGHT;
+            if (sentRequestForFork == UNDEFINED) { requestForkFrom(side); }
             listenForMessages();
         }
         eat();
@@ -120,7 +135,7 @@ void startPhilosopherLife() {
 
 void think() {
     int secondsToThink = rand() % 5 + 1;
-    customPrint(THINK, secondsToThink, UNDEFINED);
+    customPrint(THINK, secondsToThink, -1);
     while (secondsToThink > 0) {
         sleep(1);
         int flag = 0;
@@ -134,55 +149,41 @@ void eat() {
     // philosopher will eat between 1 and 5 seconds
     int secondsCount = rand() % 5 + 1;
 
-    customPrint(EAT, secondsCount, UNDEFINED);
+    customPrint(EAT, secondsCount, -1);
     sleep(secondsCount);
 
-    leftFork.isClean = 0;
-    rightFork.isClean = 0;
+    leftFork.isClean = dirty;
+    rightFork.isClean = dirty;
 }
 
 // MARK: - Get & send forks -
 
-void getFork(Side side) {
-
-    if (side == LEFT) {
-        customPrint(REQUEST_SENT, -1, LEFT);
-        leftFork.whoNeedsIt = myInfo.rank;
-        MPI_Send(&leftFork, 1, ForkType, myInfo.leftNeighbor, 1, MPI_COMM_WORLD);
-        sentRequestForFork = LEFT;
-        return;
-    }
-
-    if (side == RIGHT) {
-        customPrint(REQUEST_SENT, -1, RIGHT);
-        rightFork.whoNeedsIt = myInfo.rank;
-        MPI_Send(&rightFork, 1, ForkType, myInfo.rightNeighbor, 2, MPI_COMM_WORLD);
-        sentRequestForFork = RIGHT;
-    }
+void requestForkFrom(Side side) {
+    Fork fork = { .ownerRank = myInfo.rank };
+    int neighbor = neighborFor(side);
+    int tag = side == LEFT ? leftRequestForkTag : rightRequestForkTag;
+    MPI_Send(&fork, 1, ForkType, neighbor, tag, MPI_COMM_WORLD);
+    sentRequestForFork = side;
+    customPrint(REQUEST_SENT, -1, neighbor);
 }
 
-void sendFork(Side side) {
+void sendForkTo(Side side) {
 
-    int messageTag = side == LEFT ? 1 : 2;
+    Fork fork = { .ownerRank = myInfo.rank, .isClean = clean };
+
+    int neighbor = neighborFor(side);
+
+    int tag = side == LEFT ? leftSendForkTag : rightSendForkTag;
+
+    MPI_Send(&fork, 1, ForkType, neighbor, tag, MPI_COMM_WORLD);
+
+    customPrint(FORK_SENT, -1, neighbor);
 
     if (side == LEFT) {
-        leftFork.isClean = 1;
-        leftFork.lastOwner = myInfo.rank;
-        leftFork.whoNeedsIt = myInfo.leftNeighbor;
-        MPI_Send(&leftFork, 1, ForkType, myInfo.leftNeighbor, messageTag, MPI_COMM_WORLD);
+        leftFork.ownerRank = -1;
+        return;
     } else if (side == RIGHT) {
-        rightFork.isClean = 1;
-        rightFork.lastOwner = myInfo.rank;
-        rightFork.whoNeedsIt = myInfo.rightNeighbor;
-        MPI_Send(&rightFork, 1, ForkType, myInfo.rightNeighbor, messageTag, MPI_COMM_WORLD);
-    }
-
-    customPrint(FORK_SENT, -1, side);
-
-    if (side == LEFT) {
-        leftFork.whoNeedsIt = myInfo.rank;
-    } else {
-        rightFork.whoNeedsIt = myInfo.rank;
+        rightFork.ownerRank = -1;
     }
 }
 
@@ -195,46 +196,37 @@ void listenForMessages() {
     handleReceivedMessage(fork, status.MPI_TAG);
 }
 
-void handleReceivedMessage(Fork fork, int tag) {
+void handleReceivedMessage(Fork fork, int messageTag) {
 
-    if (tag != 1 && tag != 2) { return; } // UNKNOWN TAG
+    if (!isValid(messageTag)) { return; } // UNKNOWN TAG
 
-    Side side = tag == 1 ? LEFT : RIGHT;
+    Side side = sideFrom(messageTag);
 
     // Message is response
-    if (fork.whoNeedsIt == myInfo.rank) {
+    if (messageTag == leftSendForkTag || messageTag == rightSendForkTag) {
 
         if (side == LEFT) {
-            leftFork.whoNeedsIt = -1;
-            leftFork.lastOwner = myInfo.rank;
-            leftFork.isClean = 1;
-        } else if (side == RIGHT) {
-            rightFork.whoNeedsIt = -1;
-            rightFork.lastOwner = myInfo.rank;
-            rightFork.isClean = 1;
+            leftFork.isClean = clean;
+            leftFork.ownerRank = myInfo.rank;
+        }
+        else if (side == RIGHT) {
+            rightFork.isClean = clean;
+            rightFork.ownerRank = myInfo.rank;
         }
 
-        customPrint(FORK_RECEIVED, -1, side);
+        customPrint(FORK_RECEIVED, -1, fork.ownerRank);
         sentRequestForFork = UNDEFINED;
         return;
     }
 
     // Message is request
-    customPrint(REQEST_RECEIVED, -1, side);
-    addRequest(fork.whoNeedsIt, side);
-
-    if (!canRespondToRequest(side)) { return; }
-
-    sleep(1);
+    customPrint(REQEST_RECEIVED, -1, fork.ownerRank);
+    addRequest(fork.ownerRank, side);
     respondToRequests();
 }
 
 void addRequest(int neighbor, Side side) {
-
-    NeighborRequest request;
-    request.processorRank = neighbor;
-    request.side = side;
-
+    NeighborRequest request = { .processorRank = neighbor, .side = side };
     int index = !hasRequest(0) ? 0 : 1;
     incomingRequests[index] = request;
 }
@@ -254,62 +246,78 @@ void respondToRequests() {
 }
 
 void respondTo(NeighborRequest request) {
-
-    if (request.side == LEFT && leftFork.isClean != 0) { return; }
-    if (request.side == RIGHT && rightFork.isClean != 0) { return; }
-
-    sendFork(request.side);
+    sleep(1);
+    if (!canSendFork(request.side)) { return; }
+    sendForkTo(request.side);
 }
 
 // MARK: - Helper functions -
 
-bool hasBothForks() {
-    return !(leftFork.whoNeedsIt == myInfo.rank) && !(rightFork.whoNeedsIt == myInfo.rank);
+bool isValid(int messageTag) {
+    return messageTag == rightRequestForkTag
+        || messageTag == leftRequestForkTag
+        || messageTag == leftSendForkTag
+        || messageTag == rightSendForkTag;
 }
+
+Side sideFrom(int messageTag) {
+    if (messageTag == leftRequestForkTag) { return RIGHT; }
+    if (messageTag == rightRequestForkTag) { return LEFT; }
+    if (messageTag == leftSendForkTag) { return RIGHT; }
+    if (messageTag == rightSendForkTag) { return LEFT; }
+    return UNDEFINED;
+}
+
+bool hasLeftFork() { return leftFork.ownerRank == myInfo.rank; }
+
+bool hasRightFork() { return rightFork.ownerRank == myInfo.rank; }
+
+bool hasBothForks() { return hasLeftFork() && hasRightFork(); }
 
 bool hasRequest(int index) {
     return incomingRequests[index].processorRank != nullRequest.processorRank && incomingRequests[index].side != UNDEFINED;
 }
 
-bool canRespondToRequest(Side side) {
-    return (side == LEFT && leftFork.isClean != 1) || (side == RIGHT && rightFork.isClean != 1);
+bool canSendFork(Side side) {
+    if (side == LEFT) { return hasLeftFork() && leftFork.isClean == dirty; }
+    else if (side == RIGHT) { return hasRightFork() && rightFork.isClean == dirty; }
+    return false;
+}
+
+int neighborFor(Side side) {
+    return side == LEFT ? myInfo.leftNeighbor : myInfo.rightNeighbor;
 }
 
 // MARK: - Initialization -
 
 void createForkDataType() {
 
-    MPI_Datatype type[3] = { MPI_INT, MPI_INT, MPI_INT };
-    int blocklen[3] = { 1, 1, 1 };
-    MPI_Aint disp[3];
+    MPI_Datatype type[2] = { MPI_INT, MPI_INT };
+    int blocklen[2] = { 1, 1 };
+    MPI_Aint disp[2];
 
     disp[0] = 0;
     disp[1] = 1;
-    disp[2] = 2;
 
-    MPI_Type_create_struct(3, blocklen, disp, type, &ForkType);
+    MPI_Type_create_struct(2, blocklen, disp, type, &ForkType);
     MPI_Type_commit(&ForkType);
 }
 
 void initializeCutlery() {
 
-    rightFork.whoNeedsIt = myInfo.rank;
-    leftFork.whoNeedsIt = myInfo.rank;
+    leftFork.isClean = dirty;
+    rightFork.isClean = dirty;
 
-    leftFork.lastOwner = myInfo.leftNeighbor;
-    rightFork.lastOwner = myInfo.rightNeighbor;
+    leftFork.ownerRank = -1;
+    rightFork.ownerRank = -1;
 
     if (myInfo.rank == myInfo.processorCount - 1) { return; }
 
     if (myInfo.rank == 0) {
-        rightFork.isClean = 1;
-        rightFork.whoNeedsIt = -1;
-        rightFork.lastOwner = myInfo.rank;
+        rightFork.ownerRank = myInfo.rank;
     }
 
-    leftFork.isClean = 1;
-    leftFork.whoNeedsIt = -1;
-    leftFork.lastOwner = myInfo.rank;
+    leftFork.ownerRank = myInfo.rank;
 }
 
 int findOutNeighbor(Side side) {
@@ -325,41 +333,23 @@ int findOutNeighbor(Side side) {
 
 // MARK: - Print -
 
-void customPrint(PrintAction action, int count, Side side) {
+void customPrint(PrintAction action, int secondCount, int neighbor) {
 
-    for (int i = 0; i < myInfo.rank; i++) {
-        printf("\t\t\t\t\t");
-    }
+    for (int i = 0; i < myInfo.rank; i++) { printf("\t\t\t\t"); }
 
     if (action == CREATE) {
         printf("Kreiran procesor %d, ukupno: %d\n", myInfo.rank, myInfo.processorCount);
     } else if (action == THINK) {
-        printf("%d. razmislja %d sekundi\n", myInfo.rank, count);
+        printf("%d. razmislja %d sekundi\n", myInfo.rank, secondCount);
     } else if (action == EAT) {
-        printf("%d. jede %d sekundi\n", myInfo.rank, count);
+        printf("%d. jede %d sekundi\n", myInfo.rank, secondCount);
     } else if (action == REQEST_RECEIVED) {
-        if (side == LEFT) {
-            printf("Dobiven zahtjev od %d. za lijevom.\n", myInfo.leftNeighbor);
-        } else {
-            printf("Dobiven zahtjev od %d. za desnom.\n", myInfo.rightNeighbor);
-        }
+        printf("Dobiven zahtjev od %d.\n", neighbor);
     } else if (action == REQUEST_SENT) {
-        if (side == LEFT) {
-            printf("%d. trazi lijevu vilicu od %d\n", myInfo.rank, myInfo.leftNeighbor);
-        } else {
-            printf("%d. trazi desnu vilicu od %d\n", myInfo.rank, myInfo.rightNeighbor);
-        }
+        printf("%d. trazi vilicu od %d.\n", myInfo.rank, neighbor);
     } else if (action == FORK_RECEIVED) {
-        if (side == LEFT) {
-            printf("%d. je primio lijevu vilicu od %d\n", myInfo.rank, myInfo.leftNeighbor);
-        } else {
-            printf("%d. je primio desnu vilicu od %d\n", myInfo.rank, myInfo.rightNeighbor);
-        }
+        printf("%d. je primio vilicu od %d.\n", myInfo.rank, neighbor);
     } else if (action == FORK_SENT) {
-        if (side == LEFT) {
-            printf("%d je poslao lijevu vilicu %d\n", myInfo.rank, myInfo.leftNeighbor);
-        } else {
-            printf("%d je poslao desnu vilicu %d\n", myInfo.rank, myInfo.rightNeighbor);
-        }
+        printf("%d je poslao vilicu %d.\n", myInfo.rank, neighbor);
     }
 }
