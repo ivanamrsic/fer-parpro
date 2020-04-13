@@ -13,8 +13,6 @@
 #include <time.h>
 #include <stdbool.h>
 
-// tags. 1 - left , 2 - right
-
 typedef enum { UNDEFINED = 0, LEFT = 1, RIGHT = 2 } Side;
 
 typedef enum { CREATE, THINK, EAT, REQEST_RECEIVED, REQUEST_SENT, FORK_RECEIVED, FORK_SENT } PrintAction;
@@ -59,16 +57,16 @@ void think();
 void eat();
 
 bool hasBothForks();
+bool hasRequest(int index);
+bool canRespondToRequest(Side side);
 
 void getFork(Side side);
 void sendFork(Side side);
 
 void listenForMessages();
 void handleReceivedMessage(Fork fork, int tag);
-void handleReceivedForkFor(Fork fork, Side side, Fork receivedFork);
 void addRequest(int neighbor, Side side);
 
-bool hasRequest(int index);
 void respondToRequests();
 void respondTo(NeighborRequest request);
 
@@ -94,8 +92,8 @@ int main(int argc, char *argv[]) {
 
     customPrint(CREATE, -1, UNDEFINED);
 
-    myInfo.leftNeighbor = findOutNeighbor(LEFT); // left = 1
-    myInfo.rightNeighbor = findOutNeighbor(RIGHT); // right = 2
+    myInfo.leftNeighbor = findOutNeighbor(LEFT);
+    myInfo.rightNeighbor = findOutNeighbor(RIGHT);
 
     initializeCutlery();
 
@@ -103,6 +101,8 @@ int main(int argc, char *argv[]) {
 
     MPI_Finalize();
 }
+
+// MARK: - Philosopher life -
 
 void startPhilosopherLife() {
     while(1) {
@@ -118,9 +118,30 @@ void startPhilosopherLife() {
     }
 }
 
-bool hasBothForks() {
-    return !(leftFork.whoNeedsIt == myInfo.rank) && !(rightFork.whoNeedsIt == myInfo.rank);
+void think() {
+    int secondsToThink = rand() % 5 + 1;
+    customPrint(THINK, secondsToThink, UNDEFINED);
+    while (secondsToThink > 0) {
+        sleep(1);
+        int flag = 0;
+        MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, MPI_STATUS_IGNORE);
+        if (flag != 0) { listenForMessages(); }
+        secondsToThink -= 1;
+    }
 }
+
+void eat() {
+    // philosopher will eat between 1 and 5 seconds
+    int secondsCount = rand() % 5 + 1;
+
+    customPrint(EAT, secondsCount, UNDEFINED);
+    sleep(secondsCount);
+
+    leftFork.isClean = 0;
+    rightFork.isClean = 0;
+}
+
+// MARK: - Get & send forks -
 
 void getFork(Side side) {
 
@@ -138,114 +159,6 @@ void getFork(Side side) {
         MPI_Send(&rightFork, 1, ForkType, myInfo.rightNeighbor, 2, MPI_COMM_WORLD);
         sentRequestForFork = RIGHT;
     }
-}
-
-void listenForMessages() {
-    Fork fork;
-    MPI_Status status;
-    MPI_Recv(&fork, 1, ForkType, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-    handleReceivedMessage(fork, status.MPI_TAG);
-}
-
-void handleReceivedMessage(Fork fork, int tag) {
-
-    // Poruka je zahtjev
-    if (fork.whoNeedsIt != myInfo.rank) {
-
-        Side side = tag == 1 ? LEFT : RIGHT;
-        customPrint(REQEST_RECEIVED, -1, side);
-
-        addRequest(fork.whoNeedsIt, side);
-
-        sleep(1);
-
-        if ((side == LEFT && leftFork.isClean != 1) || (side == RIGHT && rightFork.isClean != 1)) {
-            respondToRequests();
-        }
-
-        return;
-    }
-
-    // Poruka je odgovor
-    if (tag == 1) {
-        handleReceivedForkFor(leftFork, LEFT, fork);
-    } else if (tag == 2) {
-        handleReceivedForkFor(rightFork, RIGHT, fork);
-    }
-}
-
-void handleReceivedForkFor(Fork fork, Side side, Fork receivedFork) {
-
-    if (side == LEFT) {
-        leftFork.whoNeedsIt = -1;
-        leftFork.lastOwner = myInfo.rank;
-        leftFork.isClean = 1;
-        customPrint(FORK_RECEIVED, -1, LEFT);
-    } else {
-        rightFork.whoNeedsIt = -1;
-        rightFork.lastOwner = myInfo.rank;
-        rightFork.isClean = 1;
-        customPrint(FORK_RECEIVED, -1, RIGHT);
-    }
-
-    fork.whoNeedsIt = -1;
-    fork.lastOwner = myInfo.rank;
-    sentRequestForFork = UNDEFINED;
-}
-
-void think() {
-    //            i 'istovremeno' odgovaraj na zahtjeve!            // asinkrono, s povremenom provjerom (vidi nastavak)
-
-    // philosopher will think between 1 and 5 seconds
-    int secondsCount = rand() % 5 + 1;
-    double time = secondsCount;
-
-    customPrint(THINK, secondsCount, UNDEFINED);
-
-    while (time > 0.0) {
-        sleep(1);
-
-        int flag = 0;
-
-        MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, MPI_STATUS_IGNORE);
-        if (flag != 0) { listenForMessages(); }
-        time -= 1;
-    }
-}
-
-void eat() {
-    // philosopher will eat between 1 and 5 seconds
-    int secondsCount = rand() % 5 + 1;
-
-    customPrint(EAT, secondsCount, UNDEFINED);
-    sleep(secondsCount);
-
-    leftFork.isClean = 0;
-    rightFork.isClean = 0;
-}
-
-bool hasRequest(int index) {
-    return incomingRequests[index].processorRank != nullRequest.processorRank && incomingRequests[index].side != UNDEFINED;
-}
-
-void respondToRequests() {
-
-    if (!hasRequest(0)) { return; }
-    if (hasRequest(0)) { respondTo(incomingRequests[0]); }
-    if (hasRequest(1)) { respondTo(incomingRequests[1]); }
-
-    if (!hasRequest(0) && hasRequest(1)) {
-        incomingRequests[0] = incomingRequests[1];
-        incomingRequests[1] = nullRequest;
-    }
-}
-
-void respondTo(NeighborRequest request) {
-
-    if (request.side == LEFT && leftFork.isClean != 0) { return; }
-    if (request.side == RIGHT && rightFork.isClean != 0) { return; }
-
-    sendFork(request.side);
 }
 
 void sendFork(Side side) {
@@ -273,6 +186,49 @@ void sendFork(Side side) {
     }
 }
 
+// MARK: - Receive messages
+
+void listenForMessages() {
+    Fork fork;
+    MPI_Status status;
+    MPI_Recv(&fork, 1, ForkType, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+    handleReceivedMessage(fork, status.MPI_TAG);
+}
+
+void handleReceivedMessage(Fork fork, int tag) {
+
+    if (tag != 1 && tag != 2) { return; } // UNKNOWN TAG
+
+    Side side = tag == 1 ? LEFT : RIGHT;
+
+    // Message is response
+    if (fork.whoNeedsIt == myInfo.rank) {
+
+        if (side == LEFT) {
+            leftFork.whoNeedsIt = -1;
+            leftFork.lastOwner = myInfo.rank;
+            leftFork.isClean = 1;
+        } else if (side == RIGHT) {
+            rightFork.whoNeedsIt = -1;
+            rightFork.lastOwner = myInfo.rank;
+            rightFork.isClean = 1;
+        }
+
+        customPrint(FORK_RECEIVED, -1, side);
+        sentRequestForFork = UNDEFINED;
+        return;
+    }
+
+    // Message is request
+    customPrint(REQEST_RECEIVED, -1, side);
+    addRequest(fork.whoNeedsIt, side);
+
+    if (!canRespondToRequest(side)) { return; }
+
+    sleep(1);
+    respondToRequests();
+}
+
 void addRequest(int neighbor, Side side) {
 
     NeighborRequest request;
@@ -281,6 +237,42 @@ void addRequest(int neighbor, Side side) {
 
     int index = !hasRequest(0) ? 0 : 1;
     incomingRequests[index] = request;
+}
+
+// MARK: - Respond to request
+
+void respondToRequests() {
+
+    if (!hasRequest(0)) { return; }
+    if (hasRequest(0)) { respondTo(incomingRequests[0]); }
+    if (hasRequest(1)) { respondTo(incomingRequests[1]); }
+
+    if (!hasRequest(0) && hasRequest(1)) {
+        incomingRequests[0] = incomingRequests[1];
+        incomingRequests[1] = nullRequest;
+    }
+}
+
+void respondTo(NeighborRequest request) {
+
+    if (request.side == LEFT && leftFork.isClean != 0) { return; }
+    if (request.side == RIGHT && rightFork.isClean != 0) { return; }
+
+    sendFork(request.side);
+}
+
+// MARK: - Helper functions -
+
+bool hasBothForks() {
+    return !(leftFork.whoNeedsIt == myInfo.rank) && !(rightFork.whoNeedsIt == myInfo.rank);
+}
+
+bool hasRequest(int index) {
+    return incomingRequests[index].processorRank != nullRequest.processorRank && incomingRequests[index].side != UNDEFINED;
+}
+
+bool canRespondToRequest(Side side) {
+    return (side == LEFT && leftFork.isClean != 1) || (side == RIGHT && rightFork.isClean != 1);
 }
 
 // MARK: - Initialization -
@@ -322,7 +314,7 @@ void initializeCutlery() {
 
 int findOutNeighbor(Side side) {
 
-    if (side == 1) {
+    if (side == LEFT) {
         if (myInfo.rank == myInfo.processorCount - 1) { return 0; }
         return myInfo.rank + 1;
     }
@@ -331,7 +323,7 @@ int findOutNeighbor(Side side) {
     return myInfo.processorCount - 1;
 }
 
-// MARK: - Ispis -
+// MARK: - Print -
 
 void customPrint(PrintAction action, int count, Side side) {
 
