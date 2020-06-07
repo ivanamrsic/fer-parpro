@@ -57,17 +57,21 @@ Proces(i)
 
 ### Task
 
-* Zadatak: uporabom MPI-a ostvariti program za igranje uspravne igre "4 u nizu" (connect 4) za jednog igrača (čovjek protiv računala).
+Uporabom MPI-a ostvariti program za igranje uspravne igre "4 u nizu" (connect 4) za jednog igrača (čovjek protiv računala).
 
-* Opis igre: igra je istovjetna igri križić-kružić u kojoj je cilj napraviti niz od 4 igračeva znaka, s tom razlikom da se odvija na 'uspravnom' 2D polju u kojemu se novi znak može staviti samo na polje ispod kojega već postoji neki znak ili se stavlja na dno polja ('ajmo reć' uz gravitaciju). Standardne dimenzije igračeg polja su 6 polja u visinu i 7 u širinu, mada je veličina proizvoljna. Zbog jednostavnosti, može se pretpostaviti da polje nije ograničeno u visinu, dok ograničenje u širinu mora postojati zbog ograničavanja broja mogućih poteza iz zadanog stanja
+### Opis igre
 
-* Opis slijednog algoritma: neka metoda rješavanja bude djelomično pretraživanje prostora stanja, u obliku stabla, do neke zadane dubine od trenutnog stanja. Dakle, ne pokušavamo naučiti strategiju, već se za svaki potez računala obavlja pretraga podstabla i odabire sljedeće stanje (brute force pristup). Za svako se stanje u stablu određuje vrsta:
+Igra je istovjetna igri križić-kružić u kojoj je cilj napraviti niz od 4 igračeva znaka, s tom razlikom da se odvija na 'uspravnom' 2D polju u kojemu se novi znak može staviti samo na polje ispod kojega već postoji neki znak ili se stavlja na dno polja ('ajmo reć' uz gravitaciju). Standardne dimenzije igračeg polja su 6 polja u visinu i 7 u širinu, mada je veličina proizvoljna. Zbog jednostavnosti, može se pretpostaviti da polje nije ograničeno u visinu, dok ograničenje u širinu mora postojati zbog ograničavanja broja mogućih poteza iz zadanog stanja
+
+### Opis slijednog algoritma
+
+Neka metoda rješavanja bude djelomično pretraživanje prostora stanja, u obliku stabla, do neke zadane dubine od trenutnog stanja. Dakle, ne pokušavamo naučiti strategiju, već se za svaki potez računala obavlja pretraga podstabla i odabire sljedeće stanje (brute force pristup). Za svako se stanje u stablu određuje vrsta:
 
     * stanje je 'pobjeda' ako računalo ima 4 u nizu (vrijednost 1);
     * stanje je 'poraz' ako igrač ima 4 u nizu (vrijednost -1);
     * inače, stanje je neutralno, a vrijednost će ovisiti o stanjima u podstablu (ako se podstabla pretražuju).
 
-* HINT: potragu za 4 u nizu treba obaviti samo sa polja posljednjeg odigranog poteza.
+> HINT: potragu za 4 u nizu treba obaviti samo sa polja posljednjeg odigranog poteza.
 
 * Nakon pretraživanja stabla do zadane dubine, primjenjuju se sljedeća rekurzivna pravila:
 
@@ -79,7 +83,7 @@ Osim ovim pravilima, svaki se mogući potez računala (odnosno stanje u koje s
 (broj_pobjeda_u_dubini_n - broj_poraza_u_dubini_n)/(broj_mogućih_poteza)
 Broj mogućih poteza se može smatrati konstantnim (npr. 7) uz pretpostavku o neograničenosti polja u visinu, a u stvarnim uvjetima potrebno je uzeti u obzir samo moguće poteze (ako je neki stupac popunjen). Računalo tada odabire onaj potez koji ne vodi u stanje 'poraz' (ako ima izbora) a koji ima najveću vrijednost (vrijednosti su po opisanoj definiciji u intervalu [-1,1]). Eventualna dodatna pojašnjenja dana su na predavanjima.
 
-####Ostvarenje paralelnog algoritma
+#### Ostvarenje paralelnog algoritma
 
 Program treba imati minimalno tekstno sučelje u obliku prikaza stanja polja i upita igrača o potezu. Računanje vrijednosti pojedinog poteza treba načiniti raspodijeljeno, a minimalna dubina pretraživanja stabla n je 4 (složenost je 7^n). Minimalni broj zadataka paralelnog algoritma je broj mogućih poteza (7), no taj broj je potrebno povećati (npr. dijeljenjem pri većoj dubini) poradi boljeg ujednačavanja opterećenja po procesorima.
 
